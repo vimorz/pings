@@ -5,6 +5,7 @@
 #include <optional>
 #include <thread>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pings_ui.hpp"
@@ -63,7 +64,7 @@ namespace ui
         {
             if (!latency)
             {
-                return "-";
+                return "—";
             }
 
             return std::to_string(*latency) + " ms";
@@ -229,7 +230,7 @@ namespace ui
 
             std::string status = "Нет данных";
             std::string latency = "—";
-            ftxui::Color currentColor = Color::Red;
+            ftxui::Color currentColor = Color::GrayDark;
 
             if (!host.history.empty())
             {
@@ -311,7 +312,7 @@ namespace ui
             [&]
             {
                 return vbox({
-                           text("Pings - демонстрацинный монитор") | bold,
+                           text("Pings - демонстрационный монитор") | bold,
                            text("Зелёный: ответ | Красный: тайм-аут | "
                                 "Жёлтый: ошибка | Серый: нет измерения"),
                            text(model.paused
