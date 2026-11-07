@@ -91,21 +91,25 @@ endif()
 if(PINGS_BUILD_APPS)
     # Application
     add_executable(pings
-    app/main.cpp
-    examples/batch_example.cpp
-    examples/config_example.cpp
-    examples/repeat_example.cpp
-    examples/single_example.cpp
+        app/main.cpp
+        examples/batch_example.cpp
+        examples/config_example.cpp
+        examples/repeat_example.cpp
+        examples/single_example.cpp
     )
     # Application
     add_executable(pings_tui
-    app/main.cpp
-    app/pings_ui.cpp
-    examples/batch_example.cpp
-    examples/config_example.cpp
-    examples/repeat_example.cpp
-    examples/single_example.cpp
+        app/tui_main.cpp
+        app/pings_ui.cpp
     )
+    # add_executable(pings_tui
+        # app/main.cpp
+        # app/pings_ui.cpp
+        # examples/batch_example.cpp
+        # examples/config_example.cpp
+        # examples/repeat_example.cpp
+        # examples/single_example.cpp
+    # )
 
     target_include_directories(pings
     PRIVATE
@@ -114,12 +118,12 @@ if(PINGS_BUILD_APPS)
         ${PROJECT_SOURCE_DIR}/include/utils
     )
 
-    target_include_directories(pings_tui
-    PRIVATE
-        ${PROJECT_SOURCE_DIR}/examples
-        ${PROJECT_SOURCE_DIR}/tests
-        ${PROJECT_SOURCE_DIR}/include/utils
-    )
+    # target_include_directories(pings_tui
+    # PRIVATE
+    #     ${PROJECT_SOURCE_DIR}/examples
+    #     ${PROJECT_SOURCE_DIR}/tests
+    #     ${PROJECT_SOURCE_DIR}/include/utils
+    # )
 
     target_link_libraries(pings
     PRIVATE
@@ -130,9 +134,9 @@ if(PINGS_BUILD_APPS)
 
     target_link_libraries(pings_tui
     PRIVATE
-        pings::core
-        pings::config
-        fmt::fmt
+        # pings::core
+        # pings::config
+        # fmt::fmt
         ftxui::component
         ftxui::dom
         ftxui::screen
@@ -188,8 +192,8 @@ if(PINGS_BUILD_APPS)
         $<$<CONFIG:Debug>:DEBUG_ENABLED>
     )
 
-    target_compile_definitions(pings_tui
-    PRIVATE ENABLE_UI)
+    # target_compile_definitions(pings_tui
+    # PRIVATE ENABLE_UI)
 
     add_custom_command(
         TARGET pings

@@ -105,8 +105,8 @@ conan install . `
     -pr:h=profiles/windows-msvc `
     -pr:b=default `
     -s:h build_type=Release `
-    -o "&:with_config=False" `
-    -o "&:build_apps=False"
+    -o "&:with_config=True" `
+    -o "&:build_apps=True"
 
 cmake -S . -B out/core/build `
     -G "Visual Studio 18 2026" -A x64 `

@@ -1,141 +1,388 @@
-#include <iostream>
-#include <limits>
-#include <string>
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <deque>
+#include <optional>
 #include <thread>
-#include <future>
-#include <memory>
+#include <string>
+#include <vector>
+
+#include "pings_ui.hpp"
 
 #include <ftxui/component/component.hpp>
+#include <ftxui/component/event.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
-// #include <ftxui/ftxui.hpp>
-
-using namespace ftxui;
 
 namespace ui
 {
-    int ui()
+    namespace
     {
-        auto screen = ScreenInteractive::Fullscreen();
+        constexpr std::size_t historyCapacity = 60;
 
-        // --- Состояние приложения ---
-        int hp = 100;
-        int event_counter = 0;
-        std::vector<std::string> log_lines;
-        std::atomic<bool> background_work = true;
-        bool show_log = true; // для демонстрации Maybe()
-
-        // --- Стиль для кнопок (версия 6.1.9) ---
-        auto button_style = ButtonOption::Animated();
-        button_style.transform = [](const EntryState &s)
+        enum class SampleStatus
         {
-            auto element = text(s.label);
-            if (s.focused)
-            {
-                element |= bold | color(Color::Cyan1);
-            }
-            return element | center | borderEmpty | flex;
+            Reply,
+            Timeout,
+            Error,
         };
 
-        // --- Компоненты ---
-        auto hit_button = Button("Hit (-1 HPP)", [&]
-                                 { hp -= 1; }, button_style);
-        auto hard_button = Button("Hard (-10 HP)", [&]
-                                  { hp -= 10; }, button_style);
-        auto heal_button = Button("Heal (+10 HP)", [&]
-                                  { hp += 10; }, button_style);
-
-        auto buttons = Container::Horizontal({
-            hit_button,
-            hard_button,
-            heal_button,
-        });
-
-        // --- Компонент лога (прокручиваемый) ---
-        auto log_component = Renderer([&]
-                                      {
-        Elements log_elements;
-        for (const auto& line : log_lines) {
-            log_elements.push_back(text(line));
-        }
-        return vbox(log_elements) | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 10); });
-
-        // --- Компонент, который можно скрывать/показывать через Maybe() ---
-        auto maybe_log = Maybe(log_component, &show_log);
-
-        // --- Главный компонент ---
-        // ВАЖНО: используем Renderer с дочерним компонентом, чтобы события передавались [citation:6]
-        auto main_component = Renderer(buttons, [&]
-                                       {
-        auto status_text = hbox({
-            text(" HP: ") | bold,
-            gauge(hp / 100.0f) | color(Color::Green),
-            text(" " + std::to_string(hp) + "/100 "),
-            text(" Events: " + std::to_string(event_counter)),
-            text(" [l:toggle log]"),
-        });
-
-        return vbox({
-            status_text | border,
-            separator(),
-            text(" Log:") | bold,
-            maybe_log->Render(),
-            separator(),
-            buttons->Render() | center,
-        }) | border; });
-
-        // --- Обработка событий через CatchEvent (основной способ в 6.1.9) ---
-        main_component |= CatchEvent([&](Event event)
-                                     {
-                                         // Выход по 'q'
-                                         if (event == Event::Character('q'))
-                                         {
-                                             screen.ExitLoopClosure()();
-                                             return true;
-                                         }
-                                         // Переключение видимости лога по 'l'
-                                         if (event == Event::Character('l'))
-                                         {
-                                             show_log = !show_log;
-                                             return true; // событие обработано
-                                         }
-                                         // Очистка лога по Ctrl+L
-                                         if (event == Event::CtrlL)
-                                         {
-                                             log_lines.clear();
-                                             log_lines.push_back("--- Log cleared ---");
-                                             return true;
-                                         }
-                                         return false; // событие не обработано, передаём дальше
-                                     });
-
-        // --- Фоновый поток для обновления UI ---
-        std::thread background_thread([&]
-                                      {
-        int counter = 0;
-        while (background_work) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
-            counter++;
-            std::string msg = "[INFO] Background task #" + std::to_string(counter);
-            log_lines.push_back(msg);
-            if (log_lines.size() > 20) {
-                log_lines.erase(log_lines.begin());
-            }
-            // Отправляем событие для перерисовки
-            screen.PostEvent(Event::Custom);
-        } });
-
-        // --- Запуск ---
-        screen.Loop(main_component);
-
-        // --- Очистка ---
-        background_work = false;
-        if (background_thread.joinable())
+        struct PingSample
         {
-            background_thread.join();
+            SampleStatus status;
+            std::optional<int> latencyMs;
+        };
+
+        struct HostRow
+        {
+            std::string name;
+            std::string address;
+            std::deque<PingSample> history;
+        };
+
+        struct AppModel
+        {
+            std::vector<HostRow> hosts;
+            int selected = 0;
+
+            bool paused = false;
+            unsigned int demoTick = 0;
+        };
+
+        void appendSample(HostRow &host, PingSample sample)
+        {
+            host.history.push_back(sample);
+
+            if (host.history.size() > historyCapacity)
+            {
+                host.history.pop_front();
+            }
         }
+
+        std::string formatLatency(const std::optional<int> &latency)
+        {
+            if (!latency)
+            {
+                return "-";
+            }
+
+            return std::to_string(*latency) + " ms";
+        }
+
+        std::string statusText(SampleStatus status)
+        {
+            switch (status)
+            {
+            case SampleStatus::Reply:
+                return "Ответ";
+            case SampleStatus::Timeout:
+                return "Тайм-аут";
+            case SampleStatus::Error:
+                return "Ошибка";
+            }
+
+            return "Неизвестно";
+        }
+
+        ftxui::Color statusColor(SampleStatus status)
+        {
+            using ftxui::Color;
+
+            switch (status)
+            {
+            case SampleStatus::Reply:
+                return Color::Green;
+            case SampleStatus::Timeout:
+                return Color::Red;
+            case SampleStatus::Error:
+                return Color::Yellow;
+            }
+
+            return Color::Palette16::GrayDark;
+        }
+
+        AppModel makeDemoModel()
+        {
+            AppModel model{
+                {
+                    {"Google DNS", "8.8.8.8", {}},
+                    {"Cloudflare", "1.1.1.1", {}},
+                    {"Local IPv6", "::1", {}},
+                    {"Example", "192.0.2.1", {}},
+                    {"Google DNS", "8.8.8.8", {}},
+                    {"Cloudflare", "1.1.1.1", {}},
+                    {"Local IPv6", "::1", {}},
+                    {"Example", "192.0.2.1", {}},
+                    {"Google DNS", "8.8.8.8", {}},
+                    {"Cloudflare", "1.1.1.1", {}},
+                    {"Local IPv6", "::1", {}},
+                    {"Example", "192.0.2.1", {}},
+                },
+                0,
+            };
+
+            for (std::size_t row = 0; row < model.hosts.size(); ++row)
+            {
+                for (int tick = 0; tick < 45; ++tick)
+                {
+                    const bool timeout =
+                        (tick + static_cast<int>(row) * 3) % 13 == 0;
+
+                    appendSample(
+                        model.hosts[row],
+                        {
+                            timeout ? SampleStatus::Timeout
+                                    : SampleStatus::Reply,
+                            timeout ? std::optional<int>{}
+                                    : std::optional<int>{10 + tick % 17},
+                        });
+                }
+            }
+
+            return model;
+        }
+
+        void advanceDemo(AppModel &model)
+        {
+            ++model.demoTick;
+
+            for (std::size_t i = 0; i < model.hosts.size(); ++i)
+            {
+                const auto value =
+                    model.demoTick + static_cast<unsigned int>(i) * 7u;
+
+                PingSample sample{
+                    SampleStatus::Reply,
+                    static_cast<int>(5u + value % 40u),
+                };
+
+                if (value % 19u == 0u)
+                {
+                    sample = {SampleStatus::Error, std::nullopt};
+                }
+                else if (value % 7u == 0u)
+                {
+                    sample = {SampleStatus::Timeout, std::nullopt};
+                }
+
+                appendSample(model.hosts[i], sample);
+            }
+        }
+
+        void clearHistory(AppModel &model)
+        {
+            for (auto &host : model.hosts)
+            {
+                host.history.clear();
+            }
+        }
+
+        const HostRow *selectedHost(const AppModel &model)
+        {
+            if (model.selected < 0 ||
+                static_cast<std::size_t>(model.selected) >= model.hosts.size())
+            {
+                return nullptr;
+            }
+
+            return &model.hosts[static_cast<std::size_t>(model.selected)];
+        }
+
+        void moveSelection(AppModel &model, int offset)
+        {
+            if (model.hosts.empty())
+            {
+                model.selected = 0;
+                return;
+            }
+
+            const auto last = static_cast<int>(model.hosts.size()) - 1;
+            model.selected = std::clamp(model.selected + offset, 0, last);
+        }
+
+        ftxui::Element renderHistory(const HostRow &host)
+        {
+            using namespace ftxui;
+
+            Elements cells;
+
+            // Неизмеренная часть находится слева:
+            // новые результаты появляются справа.
+            const auto emptyCount = historyCapacity - host.history.size();
+
+            for (std::size_t i = 0; i < emptyCount; ++i)
+            {
+                cells.push_back(text(" ") | bgcolor(Color::GrayDark));
+            }
+
+            for (const auto &sample : host.history)
+            {
+                cells.push_back(text(" ") | bgcolor(statusColor(sample.status)));
+            }
+
+            return hbox(std::move(cells));
+        }
+
+        ftxui::Element renderHost(const HostRow &host, bool selected)
+        {
+            using namespace ftxui;
+
+            std::string status = "Нет данных";
+            std::string latency = "—";
+            ftxui::Color currentColor = Color::Red;
+
+            if (!host.history.empty())
+            {
+                const auto &latest = host.history.back();
+                status = statusText(latest.status);
+                latency = formatLatency(latest.latencyMs);
+                currentColor = statusColor(latest.status);
+            }
+
+            auto row = hbox({
+                text(selected ? "> " : "  "),
+                text(host.name) | size(WIDTH, EQUAL, 15),
+                text(host.address) | size(WIDTH, EQUAL, 20),
+                text(latency) | size(WIDTH, EQUAL, 10),
+                text(status) | color(currentColor) | size(WIDTH, EQUAL, 12),
+                text(" ["),
+                renderHistory(host),
+                text("]"),
+            });
+
+            if (selected)
+            {
+                // focus сообщает frame, какую строку держать видимой.
+                row = row | bold | focus;
+            }
+
+            return row;
+        }
+
+        ftxui::Element renderTable(const AppModel &model)
+        {
+            using namespace ftxui;
+
+            if (model.hosts.empty())
+            {
+                return text("Хосты не добавлены");
+            }
+
+            Elements rows;
+
+            for (std::size_t i = 0; i < model.hosts.size(); ++i)
+            {
+                rows.push_back(renderHost(
+                    model.hosts[i],
+                    static_cast<int>(i) == model.selected));
+            }
+
+            return vbox(std::move(rows));
+        }
+
+        ftxui::Element renderDetails(const AppModel &model)
+        {
+            using namespace ftxui;
+
+            const auto *host = selectedHost(model);
+
+            if (!host)
+            {
+                return text("Нет выбранного хоста");
+            }
+
+            return vbox({
+                paragraph("Выбран: " + host->name + " | " + host->address),
+                text("Результатов в истории: " +
+                     std::to_string(host->history.size())),
+            });
+        }
+    } // namespace
+
+    int ui()
+    {
+        using namespace ftxui;
+
+        auto model = makeDemoModel();
+        // AppModel model;
+        auto screen = ScreenInteractive::Fullscreen();
+
+        auto renderer = Renderer(
+            [&]
+            {
+                return vbox({
+                           text("Pings - демонстрацинный монитор") | bold,
+                           text("Зелёный: ответ | Красный: тайм-аут | "
+                                "Жёлтый: ошибка | Серый: нет измерения"),
+                           text(model.paused
+                                    ? "Состояние: пауза"
+                                    : "Состояние: демонстрация"),
+                           separator(),
+
+                           renderTable(model) | vscroll_indicator | frame | flex,
+
+                           separator(),
+                           renderDetails(model),
+                           separator(),
+                           text("↑/↓: выбор | n: шаг | p: пауза | c: очистить | q: выход"),
+                       }) |
+                       border;
+            });
+
+        auto root = CatchEvent(renderer, [&](Event event)
+                               {
+                                if (event == Event::Character('q'))
+                                {
+                                    screen.ExitLoopClosure()();
+                                    return true;
+                                }
+                                if (event == Event::ArrowUp)
+                                {
+                                    moveSelection(model, -1);
+                                    return true;
+                                }
+                                if (event == Event::ArrowDown)
+                                {
+                                    moveSelection(model, 1);
+                                    return true;
+                                }
+                                if (event == Event::Character('p')) {
+                                    model.paused = !model.paused;
+                                    return true;
+                                }
+                                if (event == Event::Character('n')) {
+                                    advanceDemo(model);
+                                    return true;
+                                }
+                                if (event == Event::Character('c')) {
+                                    clearHistory(model);
+                                    return true;
+                                }
+                                if (event == Event::Custom) {
+                                    if (!model.paused) {
+                                        advanceDemo(model);
+                                    }
+                                    return true;
+                                }
+                                return false; });
+
+        std::jthread ticker([&screen](std::stop_token stop)
+                            {
+            using namespace std::chrono_literals;
+
+            while (!stop.stop_requested()) {
+                std::this_thread::sleep_for(1s);
+
+                if (stop.stop_requested()){
+                    break;
+                }
+
+                screen.PostEvent(Event::Custom);
+            } });
+
+        screen.Loop(root);
+        ticker.request_stop();
 
         return 0;
     }
-}
+} // namespace ui
