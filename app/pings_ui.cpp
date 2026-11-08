@@ -252,14 +252,14 @@ namespace ui
         std::optional<TableLayout> makeTableLayout(int terminalWidth)
         {
             constexpr int frameWidth = 3;
-            constexpr int prefferedHistoryWidth = 15;
+            constexpr int preferredHistoryWidth = 15;
             constexpr int minimumHistoryWidth = 5;
 
             TableLayout layout;
 
             // Если полная таблица оставляет слишком мало места
             // для истории, скрываем имя и текстовый статус.
-            if (terminalWidth - frameWidth - layout.fixedWidth() < prefferedHistoryWidth)
+            if (terminalWidth - frameWidth - layout.fixedWidth() < preferredHistoryWidth)
             {
                 layout.compact = true;
                 layout.nameWidth = 0;
@@ -396,28 +396,67 @@ namespace ui
         // AppModel model;
         auto screen = ScreenInteractive::Fullscreen();
 
-        auto renderer = Renderer(
-            [&]
-            {
-                const auto terminalSize = Terminal::Size();
+        auto renderer = Renderer([&]() -> Element
+                                 {
+            const auto terminalSize = Terminal::Size();
+
+            constexpr int minimumWidth = 43;
+            constexpr int minimumHeight = 20;
+
+            if (terminalSize.dimx < minimumWidth ||
+                terminalSize.dimy < minimumHeight) {
                 return vbox({
-                           text("Pings - демонстрационный монитор") | bold,
-                           text("Зелёный: ответ | Красный: тайм-аут | "
-                                "Жёлтый: ошибка | Серый: нет измерения"),
-                           text(model.paused
-                                    ? "Состояние: пауза"
-                                    : "Состояние: демонстрация"),
-                           separator(),
+                    paragraph("Увеличьте окно терминала до 43 × 20."),
+                    paragraph(
+                        "Сейчас: " +
+                        std::to_string(terminalSize.dimx) + " × " +
+                        std::to_string(terminalSize.dimy)),
+                    text("q: выход"),
+                }) | border;
+            }
 
-                           renderTable(model, terminalSize.dimx) | vscroll_indicator | frame | flex,
+            Elements sections;
 
-                           separator(),
-                           renderDetails(model),
-                           separator(),
-                           text("↑/↓: выбор | n: шаг | p: пауза | c: очистить | q: выход"),
-                       }) |
-                       border;
-            });
+            sections.push_back(
+                text("Pings — демонстрационный монитор") | bold);
+
+            // В узком окне освобождаем место для таблицы.
+            // Текстовый статус выбранного хоста есть в подробностях.
+            if (terminalSize.dimx >= 100) {
+                sections.push_back(
+                    paragraph(
+                        "Зелёный: ответ | Красный: тайм-аут | "
+                        "Жёлтый: ошибка | Серый: нет измерения"));
+            }
+
+            sections.push_back(text(
+                model.paused
+                    ? "Состояние: пауза"
+                    : "Состояние: демонстрация"));
+
+            sections.push_back(separator());
+
+            sections.push_back(
+                renderTable(model, terminalSize.dimx)
+                | vscroll_indicator
+                | frame
+                | flex);
+
+            sections.push_back(separator());
+
+            // Длинное имя или адрес не должны вытеснить таблицу.
+            sections.push_back(
+                renderDetails(model)
+                | frame
+                | size(HEIGHT, LESS_THAN, 4));
+
+            sections.push_back(separator());
+
+            sections.push_back(paragraph(
+                "↑/↓: выбор | n: шаг | p: пауза | "
+                "c: очистить | q: выход"));
+
+            return vbox(std::move(sections)) | border; });
 
         auto root = CatchEvent(renderer, [&](Event event)
                                {
