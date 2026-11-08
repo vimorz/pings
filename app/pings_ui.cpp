@@ -14,6 +14,7 @@
 #include <ftxui/component/event.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
 
 namespace ui
 {
@@ -201,30 +202,83 @@ namespace ui
             model.selected = std::clamp(model.selected + offset, 0, last);
         }
 
-        ftxui::Element renderHistory(const HostRow &host)
+        ftxui::Element renderHistory(
+            const HostRow &host,
+            std::size_t visibleCount)
         {
             using namespace ftxui;
 
-            Elements cells;
+            visibleCount = std::min(visibleCount, historyCapacity);
 
-            // Неизмеренная часть находится слева:
-            // новые результаты появляются справа.
-            const auto emptyCount = historyCapacity - host.history.size();
+            const auto sampleCount = std::min(visibleCount, host.history.size());
+
+            const auto emptyCount = visibleCount - sampleCount;
+            const auto firstSample = host.history.size() - sampleCount;
+
+            Elements cells;
 
             for (std::size_t i = 0; i < emptyCount; ++i)
             {
                 cells.push_back(text(" ") | bgcolor(Color::GrayDark));
             }
 
-            for (const auto &sample : host.history)
+            for (std::size_t i = firstSample; i < host.history.size(); ++i)
             {
-                cells.push_back(text(" ") | bgcolor(statusColor(sample.status)));
+                cells.push_back(
+                    text(" ") | bgcolor(statusColor(host.history[i].status)));
             }
-
             return hbox(std::move(cells));
         }
 
-        ftxui::Element renderHost(const HostRow &host, bool selected)
+        struct TableLayout
+        {
+            bool compact = false;
+
+            int markerWidth = 2;
+            int nameWidth = 15;
+            int addressWidth = 20;
+            int latencyWidth = 10;
+            int statusWidth = 12;
+            int bracketWidth = 3;
+
+            std::size_t visibleCount = 0;
+
+            int fixedWidth() const
+            {
+                return markerWidth + nameWidth + addressWidth + latencyWidth + statusWidth + bracketWidth;
+            }
+        };
+
+        std::optional<TableLayout> makeTableLayout(int terminalWidth)
+        {
+            constexpr int frameWidth = 3;
+            constexpr int prefferedHistoryWidth = 15;
+            constexpr int minimumHistoryWidth = 5;
+
+            TableLayout layout;
+
+            // Если полная таблица оставляет слишком мало места
+            // для истории, скрываем имя и текстовый статус.
+            if (terminalWidth - frameWidth - layout.fixedWidth() < prefferedHistoryWidth)
+            {
+                layout.compact = true;
+                layout.nameWidth = 0;
+                layout.statusWidth = 0;
+            }
+
+            const int availableWidth = terminalWidth - frameWidth - layout.fixedWidth();
+
+            if (availableWidth < minimumHistoryWidth)
+            {
+                return std::nullopt;
+            }
+
+            layout.visibleCount = static_cast<std::size_t>(std::min(availableWidth, static_cast<int>(historyCapacity)));
+
+            return layout;
+        }
+
+        ftxui::Element renderHost(const HostRow &host, bool selected, const TableLayout &layout)
         {
             using namespace ftxui;
 
@@ -240,27 +294,44 @@ namespace ui
                 currentColor = statusColor(latest.status);
             }
 
-            auto row = hbox({
-                text(selected ? "> " : "  "),
-                text(host.name) | size(WIDTH, EQUAL, 15),
-                text(host.address) | size(WIDTH, EQUAL, 20),
-                text(latency) | size(WIDTH, EQUAL, 10),
-                text(status) | color(currentColor) | size(WIDTH, EQUAL, 12),
-                text(" ["),
-                renderHistory(host),
-                text("]"),
-            });
+            Elements columns;
+
+            columns.push_back(text(selected ? "> " : "  ") | size(WIDTH, EQUAL, layout.markerWidth));
+
+            if (!layout.compact)
+            {
+                columns.push_back(
+                    text(host.name) | size(WIDTH, EQUAL, layout.nameWidth));
+            }
+
+            columns.push_back(text(host.address) | size(WIDTH, EQUAL, layout.addressWidth));
+
+            columns.push_back(
+                text(latency) | color(currentColor) | size(WIDTH, EQUAL, layout.latencyWidth));
+
+            if (!layout.compact)
+            {
+                columns.push_back(
+                    text(status) | color(currentColor) | size(WIDTH, EQUAL, layout.statusWidth));
+            }
+
+            columns.push_back(text(" ["));
+            columns.push_back(renderHistory(host, layout.visibleCount));
+            columns.push_back(text("]"));
+
+            auto row = hbox(std::move(columns));
 
             if (selected)
             {
-                // focus сообщает frame, какую строку держать видимой.
                 row = row | bold | focus;
             }
 
             return row;
         }
 
-        ftxui::Element renderTable(const AppModel &model)
+        ftxui::Element renderTable(
+            const AppModel &model,
+            int terminalWidth)
         {
             using namespace ftxui;
 
@@ -269,13 +340,22 @@ namespace ui
                 return text("Хосты не добавлены");
             }
 
+            const auto layout = makeTableLayout(terminalWidth);
+
+            if (!layout)
+            {
+                return paragraph(
+                    "Недостаточно места для таблицы. Расширьте терминал.");
+            }
+
             Elements rows;
 
             for (std::size_t i = 0; i < model.hosts.size(); ++i)
             {
                 rows.push_back(renderHost(
                     model.hosts[i],
-                    static_cast<int>(i) == model.selected));
+                    static_cast<int>(i) == model.selected,
+                    *layout));
             }
 
             return vbox(std::move(rows));
@@ -292,8 +372,16 @@ namespace ui
                 return text("Нет выбранного хоста");
             }
 
+            std::string status = "Нет данных";
+
+            if (!host->history.empty())
+            {
+                status = statusText(host->history.back().status);
+            }
+
             return vbox({
                 paragraph("Выбран: " + host->name + " | " + host->address),
+                paragraph("Статус: " + status),
                 text("Результатов в истории: " +
                      std::to_string(host->history.size())),
             });
@@ -311,6 +399,7 @@ namespace ui
         auto renderer = Renderer(
             [&]
             {
+                const auto terminalSize = Terminal::Size();
                 return vbox({
                            text("Pings - демонстрационный монитор") | bold,
                            text("Зелёный: ответ | Красный: тайм-аут | "
@@ -320,7 +409,7 @@ namespace ui
                                     : "Состояние: демонстрация"),
                            separator(),
 
-                           renderTable(model) | vscroll_indicator | frame | flex,
+                           renderTable(model, terminalSize.dimx) | vscroll_indicator | frame | flex,
 
                            separator(),
                            renderDetails(model),
