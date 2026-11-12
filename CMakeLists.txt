@@ -101,6 +101,8 @@ if(PINGS_BUILD_APPS)
     add_executable(pings_tui
         app/tui_main.cpp
         app/pings_ui.cpp
+        app/tui/app_model.cpp
+        app/tui/demo_source.cpp
     )
     # add_executable(pings_tui
         # app/main.cpp
@@ -135,7 +137,7 @@ if(PINGS_BUILD_APPS)
     target_link_libraries(pings_tui
     PRIVATE
         # pings::core
-        # pings::config
+        pings::config
         # fmt::fmt
         ftxui::component
         ftxui::dom
