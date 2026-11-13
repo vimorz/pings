@@ -13,6 +13,7 @@
 #include <ping_state.hpp>
 #include <repeat_state.hpp>
 #include <repeat_statistics.hpp>
+#include <reply_deadline.hpp>
 
 #include <utils/debug_log.hpp>
 #include <utils/encoding.hpp>
@@ -60,7 +61,8 @@ namespace pings
               static_cast<std::uint16_t>(
                   GET_PROCESS_ID() & 0xFFFF)),
           state_(detail::PingerState::Idle)
-    {}
+    {
+    }
 
     AsyncPinger::~AsyncPinger()
     {
@@ -849,8 +851,6 @@ namespace pings
         const std::uint16_t checksum = icmp::calculateChecksum(packet->data(), packet->size());
         netbytes::writeUint16BigEndian(packet->data() + icmp::ChecksumOffset, checksum);
 
-        session->sendTime = std::chrono::steady_clock::now();
-
         DEBUG_INFO("Socket is_open: {}", socket_.is_open());
         DEBUG_INFO("Destination: {}", session->destination.address().to_string());
         DEBUG_INFO("Packet size: {}", packet->size());
@@ -876,8 +876,12 @@ namespace pings
         try
         {
 
+
             // Arm receive first: a loopback reply may arrive before the send handler.
             startReceive();
+
+            session->sendTime = std::chrono::steady_clock::now();
+
             socket_.async_send_to(
                 boost::asio::buffer(*packet),
                 session->destination,
@@ -1007,11 +1011,11 @@ namespace pings
                 'B',
                 payloadSize);
 
-            // The ICMPv6 checksum field is left zero for the raw socket transport to fill.
-            session->sendTime = std::chrono::steady_clock::now();
-
             // Receive may complete before send; both paths share the session completion guard.
             startReceiveV6();
+
+            // The ICMPv6 checksum field is left zero for the raw socket transport to fill.
+            session->sendTime = std::chrono::steady_clock::now();
 
             socketV6_.async_send_to(
                 boost::asio::buffer(*packet),
@@ -1157,7 +1161,7 @@ namespace pings
     void AsyncPinger::startWaitForReply(std::shared_ptr<detail::PingSession> session)
     {
         // Start the per-session reply deadline after send completion is reported.
-        session->timeoutTimer->expires_after(session->options.replyTimeout);
+        session->timeoutTimer->expires_at(detail::replyDeadline(session->sendTime, session->options.replyTimeout));
 
         session->timeoutTimer->async_wait(
             [self = shared_from_this(), session](const boost::system::error_code &ec)
@@ -1389,20 +1393,7 @@ namespace pings
                             if (ipv4Packet->sourceAddress == session->destination.address() &&
                                 senderEndpoint_.address() == session->destination.address())
                             {
-                                const auto now =
-                                    std::chrono::steady_clock::now();
-
-                                const auto latency =
-                                    std::chrono::duration_cast<
-                                        std::chrono::milliseconds>(
-                                        now - session->sendTime);
-
-                                DEBUG_INFO("Latency: {}ms", latency.count());
-
-                                completeSession(
-                                    reply->sequence,
-                                    PingStatus::Success,
-                                    latency);
+                                completeReply(*session);
                             }
                         }
                     }
@@ -1493,16 +1484,7 @@ namespace pings
                         senderEndpointV6_.address() ==
                             session->destination.address())
                     {
-                        const auto latency =
-                            std::chrono::duration_cast<
-                                std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now() -
-                                session->sendTime);
-
-                        completeSession(
-                            reply->sequence,
-                            PingStatus::Success,
-                            latency);
+                        completeReply(*session);
                     }
                 }
             }
@@ -1518,6 +1500,27 @@ namespace pings
                 break;
             }
         }
+    }
+
+    void AsyncPinger::completeReply(detail::PingSession &session)
+    {
+        const auto latency = detail::replyLatency(
+            session.sendTime,
+            session.options.replyTimeout,
+            std::chrono::steady_clock::now());
+
+        if (latency)
+        {
+            DEBUG_INFO("Latency: {}ms", latency->count());
+        }
+
+        // A matching reply confirms the request was sent, even if it is late.
+        session.requestSent = true;
+
+        completeSession(
+            session.sequenceNumber,
+            latency ? PingStatus::Success : PingStatus::Timeout,
+            latency.value_or(std::chrono::milliseconds{0}));
     }
 
     void AsyncPinger::handleRepeatResult(std::uint64_t id, const PingResult &result)

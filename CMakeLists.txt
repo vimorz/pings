@@ -337,6 +337,16 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/src/detail"
     )
 
+    pings_add_test(
+        pings_reply_deadline_test
+        reply_deadline
+        tests/reply_deadline_test.cpp
+    )
+
+    target_include_directories(pings_reply_deadline_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/src/detail"
+    )
+
     set_tests_properties(batch_state PROPERTIES
         TIMEOUT 10
     )

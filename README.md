@@ -132,7 +132,7 @@ another one.
 Conan options select dependencies. CMake options select build targets.
 Keep them consistent when invoking CMake directly.
 
-The core-only build registers ten tests. Enabling configuration adds
+The core-only build registers eleven tests. Enabling configuration adds
 two more tests.
 
 ## Address-family policy
@@ -152,8 +152,8 @@ IPv6 connectivity.
 GitHub Actions builds and tests the project on Windows and Linux
 with two configurations:
 
-- Core only: YAML configuration and applications disabled, ten tests.
-- Full build: YAML configuration and applications enabled, twelve tests.
+- Core only: YAML configuration and applications disabled, eleven tests.
+- Full build: YAML configuration and applications enabled, thirteen tests.
 
 CI runs deterministic unit tests without raw sockets or network access.
 Conan dependency packages are cached between runs.
@@ -178,6 +178,11 @@ YAML-configured usage examples.
 
 The console application reads `config.yml` from its current working
 directory. Its build copies `app/config.yml` beside the executable.
+
+`replyTimeout` is measured from the start of the asynchronous send.
+A matching reply processed at or after that deadline is reported as
+`Timeout`. The deadline is checked before converting the RTT to whole
+milliseconds.
 
 ## License
 

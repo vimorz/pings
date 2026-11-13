@@ -112,6 +112,8 @@ namespace pings
             const boost::system::error_code &ec,
             std::size_t bytesReceived);
 
+        void completeReply(detail::PingSession &session);
+
         void handleRepeatResult(
             std::uint64_t id,
             const PingResult &result);
