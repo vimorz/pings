@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <future>
@@ -276,13 +277,17 @@ namespace ui
 
         using BatchResults = std::vector<pings::PingResult>;
 
-        BatchResults runBatch(const std::vector<pings::PingTarget> &targets)
+        BatchResults runBatch(const std::vector<pings::PingTarget> &targets, std::atomic<std::size_t> &completedCount)
         {
             std::optional<BatchResults> completed;
             auto pinger = pings::AsyncPinger::create();
 
             [[maybe_unused]] auto handle = pinger->pingBatch(
                 targets,
+                [&](std::size_t completedSoFar, std::size_t /*total*/)
+                {
+                    completedCount.store(completedSoFar);
+                },
                 [&](const BatchResults &results)
                 {
                     completed = results;
@@ -360,12 +365,47 @@ namespace ui
             }
         }
 
+        std::atomic<std::size_t> completedCount{0};
         std::future<BatchResults> pendingBatch;
         bool quitAfterBatch = false;
+
+        using Clock = std::chrono::steady_clock;
+        constexpr auto batchInterval = std::chrono::milliseconds{500};
+
+        bool continuousMode = false;
+        bool monitoring = false;
+        Clock::time_point nextBatchAt{};
 
         std::string batchStatus = targets.empty()
                                       ? "Нет включённых хостов"
                                       : "Готово к проверке";
+
+        auto startBatch = [&]() -> bool
+        {
+            if (pendingBatch.valid() || targets.empty() || quitAfterBatch)
+            {
+                return false;
+            }
+
+            try
+            {
+                completedCount.store(0);
+
+                pendingBatch = std::async(
+                    std::launch::async,
+                    [job = targets, &completedCount]
+                    {
+                        return runBatch(job, completedCount);
+                    });
+
+                return true;
+            }
+            catch (const std::exception &error)
+            {
+                batchStatus = std::string{"Не удалось начать: "} + error.what();
+                return false;
+            }
+        };
 
         auto screen = ScreenInteractive::Fullscreen();
 
@@ -405,8 +445,30 @@ namespace ui
                         "Жёлтый: ошибка | Серый: нет измерения"));
             }
 
+            std::string visibleBatchStatus = batchStatus;
+
+            if (quitAfterBatch) {
+                visibleBatchStatus = "Выход после завершения проверки";
+            } else if (pendingBatch.valid()) {
+                if (continuousMode && !monitoring) {
+                    visibleBatchStatus = "Остановка после текущего прохода";
+                } else {
+                    visibleBatchStatus =
+                        "Проверено: " + std::to_string(completedCount.load()) +
+                        " из " + std::to_string(targets.size());
+                }
+            } else if (monitoring) {
+                visibleBatchStatus = "Пауза перед следующим проходом";
+            }
+
+            if (!demoMode) {
+                sections.push_back(text(continuousMode
+                    ? "Режим: непрерывно"
+                    : "Режим: разовая проверка"));
+            }
+
             sections.push_back(text(
-                !demoMode ? batchStatus
+                !demoMode ? visibleBatchStatus
                         : model.paused ? "Состояние: пауза"
                                         : "Состояние: демонстрация"));
 
@@ -431,7 +493,7 @@ namespace ui
             sections.push_back(paragraph(
                 demoMode
                     ? "↑/↓: выбор | n: шаг | p: пауза | c: очистить | q: выход"
-                    : "↑/↓: выбор | s: проверка | q: выход"));
+                    : "↑/↓: выбор | m: режим | s: запуск | c: остановить | q: выход"));
 
             return vbox(std::move(sections)) | border; });
 
@@ -439,6 +501,8 @@ namespace ui
                                {
                                 if (event == Event::Character('q'))
                                 {
+                                    monitoring = false;
+
                                     if (pendingBatch.valid()) {
                                         quitAfterBatch = true;
                                         batchStatus = "Выход после завершения проверки";
@@ -459,54 +523,77 @@ namespace ui
                                     return true;
                                 }
                                 if (!demoMode) {
+                                    if (event == Event::Character('m')) {
+                                        if (!pendingBatch.valid() && !monitoring && !quitAfterBatch) {
+                                            continuousMode = !continuousMode;
+                                        }
+                                        return true;
+                                    }
+
                                     if (event == Event::Character('s')) {
-                                        if (!pendingBatch.valid() && !targets.empty()) {
-                                            try {
-                                                pendingBatch = std::async(
-                                                    std::launch::async,
-                                                    [job = targets] {
-                                                        return runBatch(job);
-                                                    });
-                                                batchStatus = "Проверка выполняется";
-                                            } catch (const std::exception& error) {
-                                                batchStatus = std::string{"Не удалось начать: "} +
-                                                            error.what();
+                                        if (!monitoring && startBatch()) {
+                                            monitoring = continuousMode;
+                                        }
+                                        return true;
+                                    }
+
+                                    if (event == Event::Character('c')) {
+                                        if (monitoring) {
+                                            monitoring = false;
+                                            batchStatus = pendingBatch.valid()
+                                                ? "Остановка после текущего прохода"
+                                                : "Мониторинг остановлен";
+                                        }
+                                        return true;
+                                    }
+
+                                    if (event != Event::Custom) {
+                                        return false;
+                                    }
+
+                                    if (!pendingBatch.valid()) {
+                                        if (monitoring && Clock::now() >= nextBatchAt) {
+                                            if (!startBatch()) {
+                                                monitoring = false;
                                             }
                                         }
                                         return true;
                                     }
 
-                                    if (event == Event::Custom &&
-                                        pendingBatch.valid() &&
-                                        pendingBatch.wait_for(std::chrono::seconds{0}) ==
-                                            std::future_status::ready) {
-                                        try {
-                                            const auto results = pendingBatch.get();
-
-                                            if (results.size() != targetRows.size()) {
-                                                throw std::runtime_error(
-                                                    "Unexpected number of batch results");
-                                            }
-
-                                            for (std::size_t i = 0; i < results.size(); ++i) {
-                                                appendSample(
-                                                    model.hosts[targetRows[i]],
-                                                    toSample(results[i]));
-                                            }
-
-                                            batchStatus = "Проверка завершена";
-                                        } catch (const std::exception& error) {
-                                            batchStatus = std::string{"Ошибка проверки: "} + error.what();
-                                        }
-
-                                        if (quitAfterBatch) {
-                                            screen.ExitLoopClosure()();
-                                        }
-
+                                    if (pendingBatch.wait_for(std::chrono::seconds{0}) !=
+                                        std::future_status::ready) {
                                         return true;
                                     }
 
-                                    return false;
+                                    try {
+                                        const auto results = pendingBatch.get();
+
+                                        if (results.size() != targetRows.size()) {
+                                            throw std::runtime_error(
+                                                "Unexpected number of batch results");
+                                        }
+
+                                        for (std::size_t i = 0; i < results.size(); ++i) {
+                                            appendSample(model.hosts[targetRows[i]], toSample(results[i]));
+                                        }
+
+                                        batchStatus = "Проверка завершена: " +
+                                            std::to_string(results.size()) + " из " +
+                                            std::to_string(targets.size());
+
+                                        if (monitoring) {
+                                            nextBatchAt = Clock::now() + batchInterval;
+                                        }
+                                    } catch (const std::exception& error) {
+                                        monitoring = false;
+                                        batchStatus = std::string{"Ошибка проверки: "} + error.what();
+                                    }
+
+                                    if (quitAfterBatch) {
+                                        screen.ExitLoopClosure()();
+                                    }
+
+                                    return true;
                                 }
                                 if (event == Event::Character('p')) {
                                     model.paused = !model.paused;
@@ -528,41 +615,18 @@ namespace ui
                                 }
                                 return false; });
 
-        // std::jthread ticker([&screen](std::stop_token stop)
-        //                     {
-        //     using namespace std::chrono_literals;
-
-        //     while (!stop.stop_requested()) {
-        //         std::this_thread::sleep_for(1s);
-
-        //         if (stop.stop_requested()){
-        //             break;
-        //         }
-
-        //         screen.PostEvent(Event::Custom);
-        //     } });
-
-        // screen.Loop(root);
-        // ticker.request_stop();
-
-        // std::jthread ticker;
-
-        // if (demoMode)
-        // {
-        std::jthread ticker([&screen](std::stop_token stop)
+        std::jthread ticker([&screen, demoMode](std::stop_token stop)
                             {
                 using namespace std::chrono_literals;
 
                 while (!stop.stop_requested()) {
-                    std::this_thread::sleep_for(1s);
-
+                    std::this_thread::sleep_for(demoMode ? 1000ms : 100ms);
                     if (stop.stop_requested()) {
                         break;
                     }
 
                     screen.PostEvent(Event::Custom);
                 } });
-        // }
 
         screen.Loop(root);
         ticker.request_stop();
