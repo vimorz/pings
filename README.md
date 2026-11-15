@@ -1,6 +1,12 @@
 # Pings
 
-An asynchronous ICMP ping library for C++20, built with Boost.Asio.
+Pings contains two tools for working with ICMP:
+
+- **Pings TUI** is a terminal utility for one-off checks and continuous
+  monitoring of multiple hosts. See the [TUI user guide](docs/pings-tui.md)
+  for setup, controls, and build instructions.
+- **Pings Core** is an asynchronous ICMP ping library for C++20, built with
+  Boost.Asio.
 
 The project is under active development. The public API may change before
 the first stable release.
@@ -23,7 +29,7 @@ the first stable release.
 | `pings::config` | YAML loading, validation and target mapping |
 
 The core library does not depend on YAML or the terminal UI.
-Example applications currently require the configuration module.
+Pings TUI and the console examples currently require the configuration module.
 
 ## Minimal example
 
@@ -105,8 +111,8 @@ conan install . `
     -pr:h=profiles/windows-msvc `
     -pr:b=default `
     -s:h build_type=Release `
-    -o "&:with_config=True" `
-    -o "&:build_apps=True"
+    -o "&:with_config=False" `
+    -o "&:build_apps=False"
 
 cmake -S . -B out/core/build `
     -G "Visual Studio 18 2026" -A x64 `
@@ -169,7 +175,6 @@ Conan dependency packages are cached between runs.
   lifetime of a series.
 - macOS support has not been verified.
 - CI currently covers Release builds only.
-- The terminal UI is an experimental prototype and is not connected to ping operations yet.
 
 ## Examples
 
