@@ -66,7 +66,7 @@ terminal can show fewer cells. Green is a reply, red is a reply timeout,
 yellow is another error, and gray means no measurement. The details panel
 shows the selected host's latest status and, when available, a diagnostic
 code. History is cleared on exit. The app does not yet have a database or
-immediate cancellation of an active pass. The interface labels are in Russian.
+immediate cancellation of an active pass.
 
 ## Build from source on Windows
 

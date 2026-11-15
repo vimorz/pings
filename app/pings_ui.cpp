@@ -42,14 +42,14 @@ namespace ui
             switch (status)
             {
             case SampleStatus::Reply:
-                return "Ответ";
+                return "Reply";
             case SampleStatus::Timeout:
-                return "Тайм-аут";
+                return "Timeout";
             case SampleStatus::Error:
-                return "Ошибка";
+                return "Error";
             }
 
-            return "Неизвестно";
+            return "Unknown";
         }
 
         ftxui::Color statusColor(SampleStatus status)
@@ -124,8 +124,8 @@ namespace ui
 
             TableLayout layout;
 
-            // Если полная таблица оставляет слишком мало места
-            // для истории, скрываем имя и текстовый статус.
+            // If the full table leaves too little room for the history,
+            // hide the host name and status text.
             if (terminalWidth - frameWidth - layout.fixedWidth() < preferredHistoryWidth)
             {
                 layout.compact = true;
@@ -149,7 +149,7 @@ namespace ui
         {
             using namespace ftxui;
 
-            std::string status = host.enabled ? "Нет данных" : "Отключён";
+            std::string status = host.enabled ? "No data" : "Disabled";
             std::string latency = "—";
             ftxui::Color currentColor = Color::GrayDark;
 
@@ -204,7 +204,7 @@ namespace ui
 
             if (model.hosts.empty())
             {
-                return text("Хосты не добавлены");
+                return text("No hosts configured");
             }
 
             const auto layout = makeTableLayout(terminalWidth);
@@ -212,7 +212,7 @@ namespace ui
             if (!layout)
             {
                 return paragraph(
-                    "Недостаточно места для таблицы. Расширьте терминал.");
+                    "Not enough room for the table. Widen the terminal.");
             }
 
             Elements rows;
@@ -236,10 +236,10 @@ namespace ui
 
             if (!host)
             {
-                return text("Нет выбранного хоста");
+                return text("No host selected");
             }
 
-            std::string status = host->enabled ? "Нет данных" : "Отключён";
+            std::string status = host->enabled ? "No data" : "Disabled";
 
             if (!host->history.empty())
             {
@@ -255,23 +255,23 @@ namespace ui
 
             const auto summary = summarizeHistory(*host);
 
-            std::string statusLine = "Статус: " + status;
+            std::string statusLine = "Status: " + status;
 
             if (host->replyTimeout)
             {
-                statusLine = "Лимит ответа: " +
+                statusLine = "Reply timeout: " +
                              std::to_string(host->replyTimeout->count()) +
-                             " мс | " + statusLine;
+                             " ms | " + statusLine;
             }
 
             return vbox({
-                paragraph("Выбран: " + host->name + " | " + host->address),
+                paragraph("Selected: " + host->name + " | " + host->address),
                 paragraph(statusLine),
                 paragraph(
-                    "В истории: " + std::to_string(host->history.size()) +
-                    " | Ответов: " + std::to_string(summary.replies) +
-                    " | Тайм-аутов: " + std::to_string(summary.timeouts) +
-                    " | Ошибок: " + std::to_string(summary.errors)),
+                    "History: " + std::to_string(host->history.size()) +
+                    " | Replies: " + std::to_string(summary.replies) +
+                    " | Timeouts: " + std::to_string(summary.timeouts) +
+                    " | Errors: " + std::to_string(summary.errors)),
             });
         }
 
@@ -377,8 +377,8 @@ namespace ui
         Clock::time_point nextBatchAt{};
 
         std::string batchStatus = targets.empty()
-                                      ? "Нет включённых хостов"
-                                      : "Готово к проверке";
+                                      ? "No enabled hosts"
+                                      : "Ready to check";
 
         auto startBatch = [&]() -> bool
         {
@@ -402,7 +402,7 @@ namespace ui
             }
             catch (const std::exception &error)
             {
-                batchStatus = std::string{"Не удалось начать: "} + error.what();
+                batchStatus = std::string{"Could not start: "} + error.what();
                 return false;
             }
         };
@@ -419,12 +419,12 @@ namespace ui
             if (terminalSize.dimx < minimumWidth ||
                 terminalSize.dimy < minimumHeight) {
                 return vbox({
-                    paragraph("Увеличьте окно терминала до 43 × 20."),
+                    paragraph("Resize the terminal to at least 43 × 20."),
                     paragraph(
-                        "Сейчас: " +
+                        "Current size: " +
                         std::to_string(terminalSize.dimx) + " × " +
                         std::to_string(terminalSize.dimy)),
-                    text("q: выход"),
+                    text("q: exit"),
                 }) | border;
             }
 
@@ -432,45 +432,43 @@ namespace ui
 
             sections.push_back(
                 text(demoMode
-                    ? "Pings — демонстрационный монитор"
-                    : "Pings — хосты из конфигурации")
+                    ? "Pings — Offline demo"
+                    : "Pings — Host monitor")
                 | bold);
 
-            // В узком окне освобождаем место для таблицы.
-            // Текстовый статус выбранного хоста есть в подробностях.
+            // In a narrow terminal, leave more room for the table.
+            // The selected host's status text is still visible in the details panel.
             if (terminalSize.dimx >= 100) {
                 sections.push_back(
                     paragraph(
-                        "Зелёный: ответ | Красный: тайм-аут | "
-                        "Жёлтый: ошибка | Серый: нет измерения"));
+                        "Green: reply | Red: timeout | Yellow: error | Gray: no data"));
             }
 
             std::string visibleBatchStatus = batchStatus;
 
             if (quitAfterBatch) {
-                visibleBatchStatus = "Выход после завершения проверки";
+                visibleBatchStatus = "Exiting after this pass";
             } else if (pendingBatch.valid()) {
                 if (continuousMode && !monitoring) {
-                    visibleBatchStatus = "Остановка после текущего прохода";
+                    visibleBatchStatus = "Stopping after this pass";
                 } else {
                     visibleBatchStatus =
-                        "Проверено: " + std::to_string(completedCount.load()) +
-                        " из " + std::to_string(targets.size());
+                        "Checked: " + std::to_string(completedCount.load()) +
+                        " of " + std::to_string(targets.size());
                 }
             } else if (monitoring) {
-                visibleBatchStatus = "Пауза перед следующим проходом";
+                visibleBatchStatus = "Waiting for the next pass";
             }
 
             if (!demoMode) {
                 sections.push_back(text(continuousMode
-                    ? "Режим: непрерывно"
-                    : "Режим: разовая проверка"));
+                    ? "Mode: Continuous"
+                    : "Mode: Single check"));
             }
 
             sections.push_back(text(
                 !demoMode ? visibleBatchStatus
-                        : model.paused ? "Состояние: пауза"
-                                        : "Состояние: демонстрация"));
+                        : model.paused ? "Status: Paused" : "Status: Demo running"));
 
             sections.push_back(separator());
 
@@ -482,7 +480,7 @@ namespace ui
 
             sections.push_back(separator());
 
-            // Длинное имя или адрес не должны вытеснить таблицу.
+            // Keep long host names and addresses from crowding out the table.
             sections.push_back(
                 renderDetails(model)
                 | frame
@@ -492,8 +490,8 @@ namespace ui
 
             sections.push_back(paragraph(
                 demoMode
-                    ? "↑/↓: выбор | n: шаг | p: пауза | c: очистить | q: выход"
-                    : "↑/↓: выбор | m: режим | s: запуск | c: остановить | q: выход"));
+                    ? "↑/↓: select | n: step | p: pause | c: clear | q: quit"
+                    : "↑/↓: select | m: mode | s: start | c: stop | q: quit"));
 
             return vbox(std::move(sections)) | border; });
 
@@ -505,7 +503,7 @@ namespace ui
 
                                     if (pendingBatch.valid()) {
                                         quitAfterBatch = true;
-                                        batchStatus = "Выход после завершения проверки";
+                                        batchStatus = "Exiting after this pass";
                                         return true;
                                     }
 
@@ -541,8 +539,8 @@ namespace ui
                                         if (monitoring) {
                                             monitoring = false;
                                             batchStatus = pendingBatch.valid()
-                                                ? "Остановка после текущего прохода"
-                                                : "Мониторинг остановлен";
+                                                ? "Stopping after this pass"
+                                                : "Monitoring stopped";
                                         }
                                         return true;
                                     }
@@ -577,8 +575,8 @@ namespace ui
                                             appendSample(model.hosts[targetRows[i]], toSample(results[i]));
                                         }
 
-                                        batchStatus = "Проверка завершена: " +
-                                            std::to_string(results.size()) + " из " +
+                                        batchStatus = "Check complete: " +
+                                            std::to_string(results.size()) + " of " +
                                             std::to_string(targets.size());
 
                                         if (monitoring) {
@@ -586,7 +584,7 @@ namespace ui
                                         }
                                     } catch (const std::exception& error) {
                                         monitoring = false;
-                                        batchStatus = std::string{"Ошибка проверки: "} + error.what();
+                                        batchStatus = std::string{"Check failed: "} + error.what();
                                     }
 
                                     if (quitAfterBatch) {
