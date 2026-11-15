@@ -1,69 +1,37 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
-#include <deque>
+#include <future>
 #include <optional>
 #include <thread>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
-
-#include "pings_ui.hpp"
 
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
+
+#include <pings/async_pinger.hpp>
+#include <pings/ping_target.hpp>
+
+#include "pings_ui.hpp"
+#include "tui/app_model.hpp"
+#include "tui/demo_source.hpp"
 
 namespace ui
 {
     namespace
     {
-        constexpr std::size_t historyCapacity = 60;
-
-        enum class SampleStatus
-        {
-            Reply,
-            Timeout,
-            Error,
-        };
-
-        struct PingSample
-        {
-            SampleStatus status;
-            std::optional<int> latencyMs;
-        };
-
-        struct HostRow
-        {
-            std::string name;
-            std::string address;
-            std::deque<PingSample> history;
-        };
-
-        struct AppModel
-        {
-            std::vector<HostRow> hosts;
-            int selected = 0;
-
-            bool paused = false;
-            unsigned int demoTick = 0;
-        };
-
-        void appendSample(HostRow &host, PingSample sample)
-        {
-            host.history.push_back(sample);
-
-            if (host.history.size() > historyCapacity)
-            {
-                host.history.pop_front();
-            }
-        }
-
         std::string formatLatency(const std::optional<int> &latency)
         {
             if (!latency)
             {
-                return "-";
+                return "—";
             }
 
             return std::to_string(*latency) + " ms";
@@ -101,135 +69,89 @@ namespace ui
             return Color::Palette16::GrayDark;
         }
 
-        AppModel makeDemoModel()
-        {
-            AppModel model{
-                {
-                    {"Google DNS", "8.8.8.8", {}},
-                    {"Cloudflare", "1.1.1.1", {}},
-                    {"Local IPv6", "::1", {}},
-                    {"Example", "192.0.2.1", {}},
-                    {"Google DNS", "8.8.8.8", {}},
-                    {"Cloudflare", "1.1.1.1", {}},
-                    {"Local IPv6", "::1", {}},
-                    {"Example", "192.0.2.1", {}},
-                    {"Google DNS", "8.8.8.8", {}},
-                    {"Cloudflare", "1.1.1.1", {}},
-                    {"Local IPv6", "::1", {}},
-                    {"Example", "192.0.2.1", {}},
-                },
-                0,
-            };
-
-            for (std::size_t row = 0; row < model.hosts.size(); ++row)
-            {
-                for (int tick = 0; tick < 45; ++tick)
-                {
-                    const bool timeout =
-                        (tick + static_cast<int>(row) * 3) % 13 == 0;
-
-                    appendSample(
-                        model.hosts[row],
-                        {
-                            timeout ? SampleStatus::Timeout
-                                    : SampleStatus::Reply,
-                            timeout ? std::optional<int>{}
-                                    : std::optional<int>{10 + tick % 17},
-                        });
-                }
-            }
-
-            return model;
-        }
-
-        void advanceDemo(AppModel &model)
-        {
-            ++model.demoTick;
-
-            for (std::size_t i = 0; i < model.hosts.size(); ++i)
-            {
-                const auto value =
-                    model.demoTick + static_cast<unsigned int>(i) * 7u;
-
-                PingSample sample{
-                    SampleStatus::Reply,
-                    static_cast<int>(5u + value % 40u),
-                };
-
-                if (value % 19u == 0u)
-                {
-                    sample = {SampleStatus::Error, std::nullopt};
-                }
-                else if (value % 7u == 0u)
-                {
-                    sample = {SampleStatus::Timeout, std::nullopt};
-                }
-
-                appendSample(model.hosts[i], sample);
-            }
-        }
-
-        void clearHistory(AppModel &model)
-        {
-            for (auto &host : model.hosts)
-            {
-                host.history.clear();
-            }
-        }
-
-        const HostRow *selectedHost(const AppModel &model)
-        {
-            if (model.selected < 0 ||
-                static_cast<std::size_t>(model.selected) >= model.hosts.size())
-            {
-                return nullptr;
-            }
-
-            return &model.hosts[static_cast<std::size_t>(model.selected)];
-        }
-
-        void moveSelection(AppModel &model, int offset)
-        {
-            if (model.hosts.empty())
-            {
-                model.selected = 0;
-                return;
-            }
-
-            const auto last = static_cast<int>(model.hosts.size()) - 1;
-            model.selected = std::clamp(model.selected + offset, 0, last);
-        }
-
-        ftxui::Element renderHistory(const HostRow &host)
+        ftxui::Element renderHistory(
+            const HostRow &host,
+            std::size_t visibleCount)
         {
             using namespace ftxui;
 
-            Elements cells;
+            visibleCount = std::min(visibleCount, historyCapacity);
 
-            // Неизмеренная часть находится слева:
-            // новые результаты появляются справа.
-            const auto emptyCount = historyCapacity - host.history.size();
+            const auto sampleCount = std::min(visibleCount, host.history.size());
+
+            const auto emptyCount = visibleCount - sampleCount;
+            const auto firstSample = host.history.size() - sampleCount;
+
+            Elements cells;
 
             for (std::size_t i = 0; i < emptyCount; ++i)
             {
                 cells.push_back(text(" ") | bgcolor(Color::GrayDark));
             }
 
-            for (const auto &sample : host.history)
+            for (std::size_t i = firstSample; i < host.history.size(); ++i)
             {
-                cells.push_back(text(" ") | bgcolor(statusColor(sample.status)));
+                cells.push_back(
+                    text(" ") | bgcolor(statusColor(host.history[i].status)));
             }
-
             return hbox(std::move(cells));
         }
 
-        ftxui::Element renderHost(const HostRow &host, bool selected)
+        struct TableLayout
+        {
+            bool compact = false;
+
+            int markerWidth = 2;
+            int nameWidth = 15;
+            int addressWidth = 20;
+            int latencyWidth = 10;
+            int statusWidth = 12;
+            int bracketWidth = 3;
+
+            std::size_t visibleCount = 0;
+
+            int fixedWidth() const
+            {
+                return markerWidth + nameWidth + addressWidth + latencyWidth + statusWidth + bracketWidth;
+            }
+        };
+
+        std::optional<TableLayout> makeTableLayout(int terminalWidth)
+        {
+            constexpr int frameWidth = 3;
+            constexpr int preferredHistoryWidth = 15;
+            constexpr int minimumHistoryWidth = 5;
+
+            TableLayout layout;
+
+            // Если полная таблица оставляет слишком мало места
+            // для истории, скрываем имя и текстовый статус.
+            if (terminalWidth - frameWidth - layout.fixedWidth() < preferredHistoryWidth)
+            {
+                layout.compact = true;
+                layout.nameWidth = 0;
+                layout.statusWidth = 0;
+            }
+
+            const int availableWidth = terminalWidth - frameWidth - layout.fixedWidth();
+
+            if (availableWidth < minimumHistoryWidth)
+            {
+                return std::nullopt;
+            }
+
+            layout.visibleCount = static_cast<std::size_t>(std::min(availableWidth, static_cast<int>(historyCapacity)));
+
+            return layout;
+        }
+
+        ftxui::Element renderHost(const HostRow &host, bool selected, const TableLayout &layout)
         {
             using namespace ftxui;
 
-            std::string status = "Нет данных";
+            std::string status = host.enabled ? "Нет данных" : "Отключён";
             std::string latency = "—";
-            ftxui::Color currentColor = Color::Red;
+            ftxui::Color currentColor = Color::GrayDark;
 
             if (!host.history.empty())
             {
@@ -239,27 +161,44 @@ namespace ui
                 currentColor = statusColor(latest.status);
             }
 
-            auto row = hbox({
-                text(selected ? "> " : "  "),
-                text(host.name) | size(WIDTH, EQUAL, 15),
-                text(host.address) | size(WIDTH, EQUAL, 20),
-                text(latency) | size(WIDTH, EQUAL, 10),
-                text(status) | color(currentColor) | size(WIDTH, EQUAL, 12),
-                text(" ["),
-                renderHistory(host),
-                text("]"),
-            });
+            Elements columns;
+
+            columns.push_back(text(selected ? "> " : "  ") | size(WIDTH, EQUAL, layout.markerWidth));
+
+            if (!layout.compact)
+            {
+                columns.push_back(
+                    text(host.name) | size(WIDTH, EQUAL, layout.nameWidth));
+            }
+
+            columns.push_back(text(host.address) | size(WIDTH, EQUAL, layout.addressWidth));
+
+            columns.push_back(
+                text(latency) | color(currentColor) | size(WIDTH, EQUAL, layout.latencyWidth));
+
+            if (!layout.compact)
+            {
+                columns.push_back(
+                    text(status) | color(currentColor) | size(WIDTH, EQUAL, layout.statusWidth));
+            }
+
+            columns.push_back(text(" ["));
+            columns.push_back(renderHistory(host, layout.visibleCount));
+            columns.push_back(text("]"));
+
+            auto row = hbox(std::move(columns));
 
             if (selected)
             {
-                // focus сообщает frame, какую строку держать видимой.
                 row = row | bold | focus;
             }
 
             return row;
         }
 
-        ftxui::Element renderTable(const AppModel &model)
+        ftxui::Element renderTable(
+            const AppModel &model,
+            int terminalWidth)
         {
             using namespace ftxui;
 
@@ -268,13 +207,22 @@ namespace ui
                 return text("Хосты не добавлены");
             }
 
+            const auto layout = makeTableLayout(terminalWidth);
+
+            if (!layout)
+            {
+                return paragraph(
+                    "Недостаточно места для таблицы. Расширьте терминал.");
+            }
+
             Elements rows;
 
             for (std::size_t i = 0; i < model.hosts.size(); ++i)
             {
                 rows.push_back(renderHost(
                     model.hosts[i],
-                    static_cast<int>(i) == model.selected));
+                    static_cast<int>(i) == model.selected,
+                    *layout));
             }
 
             return vbox(std::move(rows));
@@ -291,48 +239,276 @@ namespace ui
                 return text("Нет выбранного хоста");
             }
 
+            std::string status = host->enabled ? "Нет данных" : "Отключён";
+
+            if (!host->history.empty())
+            {
+                const auto &latest = host->history.back();
+                status = statusText(latest.status);
+
+                if (!latest.detail.empty())
+                {
+                    status += " — ";
+                    status += latest.detail;
+                }
+            }
+
+            const auto summary = summarizeHistory(*host);
+
+            std::string statusLine = "Статус: " + status;
+
+            if (host->replyTimeout)
+            {
+                statusLine = "Лимит ответа: " +
+                             std::to_string(host->replyTimeout->count()) +
+                             " мс | " + statusLine;
+            }
+
             return vbox({
                 paragraph("Выбран: " + host->name + " | " + host->address),
-                text("Результатов в истории: " +
-                     std::to_string(host->history.size())),
+                paragraph(statusLine),
+                paragraph(
+                    "В истории: " + std::to_string(host->history.size()) +
+                    " | Ответов: " + std::to_string(summary.replies) +
+                    " | Тайм-аутов: " + std::to_string(summary.timeouts) +
+                    " | Ошибок: " + std::to_string(summary.errors)),
             });
+        }
+
+        using BatchResults = std::vector<pings::PingResult>;
+
+        BatchResults runBatch(const std::vector<pings::PingTarget> &targets, std::atomic<std::size_t> &completedCount)
+        {
+            std::optional<BatchResults> completed;
+            auto pinger = pings::AsyncPinger::create();
+
+            [[maybe_unused]] auto handle = pinger->pingBatch(
+                targets,
+                [&](std::size_t completedSoFar, std::size_t /*total*/)
+                {
+                    completedCount.store(completedSoFar);
+                },
+                [&](const BatchResults &results)
+                {
+                    completed = results;
+                });
+
+            pinger->run();
+
+            if (!completed)
+            {
+                throw std::runtime_error(
+                    "Batch finished without delivering results");
+            }
+
+            return std::move(*completed);
+        }
+
+        PingSample toSample(const pings::PingResult &result)
+        {
+            if (result.status == pings::PingStatus::Success)
+            {
+                std::optional<int> latencyMs;
+                if (result.latency)
+                {
+                    latencyMs = static_cast<int>(result.latency->count());
+                }
+                return {SampleStatus::Reply, latencyMs};
+            }
+
+            const auto status = result.status == pings::PingStatus::Timeout
+                                    ? SampleStatus::Timeout
+                                    : SampleStatus::Error;
+
+            std::string detail{pings::toString(result.status)};
+
+            if (result.error)
+            {
+                detail += " [";
+                detail += result.error.category().name();
+                detail += ':';
+                detail += std::to_string(result.error.value());
+                detail += ']';
+            }
+
+            return {status, std::nullopt, std::move(detail)};
         }
     } // namespace
 
-    int ui()
+    int ui(AppModel model, UiMode mode, std::vector<pings::PingTarget> targets)
     {
         using namespace ftxui;
 
-        auto model = makeDemoModel();
-        // AppModel model;
+        const bool demoMode = mode == UiMode::Demo;
+
+        std::vector<std::size_t> targetRows;
+
+        for (std::size_t i = 0; i < model.hosts.size(); ++i)
+        {
+            if (model.hosts[i].enabled)
+            {
+                targetRows.push_back(i);
+            }
+        }
+
+        if (!demoMode && targets.size() != targetRows.size())
+        {
+            throw std::logic_error("Batch targets do not match TUI rows");
+        }
+
+        if (!demoMode)
+        {
+            for (std::size_t i = 0; i < targets.size(); ++i)
+            {
+                model.hosts[targetRows[i]].replyTimeout =
+                    targets[i].options.replyTimeout;
+            }
+        }
+
+        std::atomic<std::size_t> completedCount{0};
+        std::future<BatchResults> pendingBatch;
+        bool quitAfterBatch = false;
+
+        using Clock = std::chrono::steady_clock;
+        constexpr auto batchInterval = std::chrono::milliseconds{500};
+
+        bool continuousMode = false;
+        bool monitoring = false;
+        Clock::time_point nextBatchAt{};
+
+        std::string batchStatus = targets.empty()
+                                      ? "Нет включённых хостов"
+                                      : "Готово к проверке";
+
+        auto startBatch = [&]() -> bool
+        {
+            if (pendingBatch.valid() || targets.empty() || quitAfterBatch)
+            {
+                return false;
+            }
+
+            try
+            {
+                completedCount.store(0);
+
+                pendingBatch = std::async(
+                    std::launch::async,
+                    [job = targets, &completedCount]
+                    {
+                        return runBatch(job, completedCount);
+                    });
+
+                return true;
+            }
+            catch (const std::exception &error)
+            {
+                batchStatus = std::string{"Не удалось начать: "} + error.what();
+                return false;
+            }
+        };
+
         auto screen = ScreenInteractive::Fullscreen();
 
-        auto renderer = Renderer(
-            [&]
-            {
+        auto renderer = Renderer([&]() -> Element
+                                 {
+            const auto terminalSize = Terminal::Size();
+
+            constexpr int minimumWidth = 43;
+            constexpr int minimumHeight = 20;
+
+            if (terminalSize.dimx < minimumWidth ||
+                terminalSize.dimy < minimumHeight) {
                 return vbox({
-                           text("Pings - демонстрацинный монитор") | bold,
-                           text("Зелёный: ответ | Красный: тайм-аут | "
-                                "Жёлтый: ошибка | Серый: нет измерения"),
-                           text(model.paused
-                                    ? "Состояние: пауза"
-                                    : "Состояние: демонстрация"),
-                           separator(),
+                    paragraph("Увеличьте окно терминала до 43 × 20."),
+                    paragraph(
+                        "Сейчас: " +
+                        std::to_string(terminalSize.dimx) + " × " +
+                        std::to_string(terminalSize.dimy)),
+                    text("q: выход"),
+                }) | border;
+            }
 
-                           renderTable(model) | vscroll_indicator | frame | flex,
+            Elements sections;
 
-                           separator(),
-                           renderDetails(model),
-                           separator(),
-                           text("↑/↓: выбор | n: шаг | p: пауза | c: очистить | q: выход"),
-                       }) |
-                       border;
-            });
+            sections.push_back(
+                text(demoMode
+                    ? "Pings — демонстрационный монитор"
+                    : "Pings — хосты из конфигурации")
+                | bold);
+
+            // В узком окне освобождаем место для таблицы.
+            // Текстовый статус выбранного хоста есть в подробностях.
+            if (terminalSize.dimx >= 100) {
+                sections.push_back(
+                    paragraph(
+                        "Зелёный: ответ | Красный: тайм-аут | "
+                        "Жёлтый: ошибка | Серый: нет измерения"));
+            }
+
+            std::string visibleBatchStatus = batchStatus;
+
+            if (quitAfterBatch) {
+                visibleBatchStatus = "Выход после завершения проверки";
+            } else if (pendingBatch.valid()) {
+                if (continuousMode && !monitoring) {
+                    visibleBatchStatus = "Остановка после текущего прохода";
+                } else {
+                    visibleBatchStatus =
+                        "Проверено: " + std::to_string(completedCount.load()) +
+                        " из " + std::to_string(targets.size());
+                }
+            } else if (monitoring) {
+                visibleBatchStatus = "Пауза перед следующим проходом";
+            }
+
+            if (!demoMode) {
+                sections.push_back(text(continuousMode
+                    ? "Режим: непрерывно"
+                    : "Режим: разовая проверка"));
+            }
+
+            sections.push_back(text(
+                !demoMode ? visibleBatchStatus
+                        : model.paused ? "Состояние: пауза"
+                                        : "Состояние: демонстрация"));
+
+            sections.push_back(separator());
+
+            sections.push_back(
+                renderTable(model, terminalSize.dimx)
+                | vscroll_indicator
+                | frame
+                | flex);
+
+            sections.push_back(separator());
+
+            // Длинное имя или адрес не должны вытеснить таблицу.
+            sections.push_back(
+                renderDetails(model)
+                | frame
+                | size(HEIGHT, LESS_THAN, 4));
+
+            sections.push_back(separator());
+
+            sections.push_back(paragraph(
+                demoMode
+                    ? "↑/↓: выбор | n: шаг | p: пауза | c: очистить | q: выход"
+                    : "↑/↓: выбор | m: режим | s: запуск | c: остановить | q: выход"));
+
+            return vbox(std::move(sections)) | border; });
 
         auto root = CatchEvent(renderer, [&](Event event)
                                {
                                 if (event == Event::Character('q'))
                                 {
+                                    monitoring = false;
+
+                                    if (pendingBatch.valid()) {
+                                        quitAfterBatch = true;
+                                        batchStatus = "Выход после завершения проверки";
+                                        return true;
+                                    }
+
                                     screen.ExitLoopClosure()();
                                     return true;
                                 }
@@ -344,6 +520,79 @@ namespace ui
                                 if (event == Event::ArrowDown)
                                 {
                                     moveSelection(model, 1);
+                                    return true;
+                                }
+                                if (!demoMode) {
+                                    if (event == Event::Character('m')) {
+                                        if (!pendingBatch.valid() && !monitoring && !quitAfterBatch) {
+                                            continuousMode = !continuousMode;
+                                        }
+                                        return true;
+                                    }
+
+                                    if (event == Event::Character('s')) {
+                                        if (!monitoring && startBatch()) {
+                                            monitoring = continuousMode;
+                                        }
+                                        return true;
+                                    }
+
+                                    if (event == Event::Character('c')) {
+                                        if (monitoring) {
+                                            monitoring = false;
+                                            batchStatus = pendingBatch.valid()
+                                                ? "Остановка после текущего прохода"
+                                                : "Мониторинг остановлен";
+                                        }
+                                        return true;
+                                    }
+
+                                    if (event != Event::Custom) {
+                                        return false;
+                                    }
+
+                                    if (!pendingBatch.valid()) {
+                                        if (monitoring && Clock::now() >= nextBatchAt) {
+                                            if (!startBatch()) {
+                                                monitoring = false;
+                                            }
+                                        }
+                                        return true;
+                                    }
+
+                                    if (pendingBatch.wait_for(std::chrono::seconds{0}) !=
+                                        std::future_status::ready) {
+                                        return true;
+                                    }
+
+                                    try {
+                                        const auto results = pendingBatch.get();
+
+                                        if (results.size() != targetRows.size()) {
+                                            throw std::runtime_error(
+                                                "Unexpected number of batch results");
+                                        }
+
+                                        for (std::size_t i = 0; i < results.size(); ++i) {
+                                            appendSample(model.hosts[targetRows[i]], toSample(results[i]));
+                                        }
+
+                                        batchStatus = "Проверка завершена: " +
+                                            std::to_string(results.size()) + " из " +
+                                            std::to_string(targets.size());
+
+                                        if (monitoring) {
+                                            nextBatchAt = Clock::now() + batchInterval;
+                                        }
+                                    } catch (const std::exception& error) {
+                                        monitoring = false;
+                                        batchStatus = std::string{"Ошибка проверки: "} + error.what();
+                                    }
+
+                                    if (quitAfterBatch) {
+                                        screen.ExitLoopClosure()();
+                                    }
+
                                     return true;
                                 }
                                 if (event == Event::Character('p')) {
@@ -366,19 +615,18 @@ namespace ui
                                 }
                                 return false; });
 
-        std::jthread ticker([&screen](std::stop_token stop)
+        std::jthread ticker([&screen, demoMode](std::stop_token stop)
                             {
-            using namespace std::chrono_literals;
+                using namespace std::chrono_literals;
 
-            while (!stop.stop_requested()) {
-                std::this_thread::sleep_for(1s);
+                while (!stop.stop_requested()) {
+                    std::this_thread::sleep_for(demoMode ? 1000ms : 100ms);
+                    if (stop.stop_requested()) {
+                        break;
+                    }
 
-                if (stop.stop_requested()){
-                    break;
-                }
-
-                screen.PostEvent(Event::Custom);
-            } });
+                    screen.PostEvent(Event::Custom);
+                } });
 
         screen.Loop(root);
         ticker.request_stop();
